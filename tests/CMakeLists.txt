@@ -1,0 +1,13 @@
+add_executable(gesture_composer_tests
+  test_main.cpp
+  test_features.cpp
+  test_gestures.cpp
+  test_io.cpp
+)
+target_link_libraries(gesture_composer_tests PRIVATE gesture_composer gesture_composer_openxr gesture_composer_visionos)
+target_include_directories(gesture_composer_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/fake_openxr)
+add_test(NAME gesture_composer_tests COMMAND gesture_composer_tests)
+
+add_executable(gesture_composer_alloc_test test_alloc.cpp)
+target_link_libraries(gesture_composer_alloc_test PRIVATE gesture_composer)
+add_test(NAME gesture_composer_alloc_test COMMAND gesture_composer_alloc_test)

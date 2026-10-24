@@ -1,0 +1,2 @@
+add_executable(gesture_composer_bench bench.cpp)
+target_link_libraries(gesture_composer_bench PRIVATE gesture_composer)

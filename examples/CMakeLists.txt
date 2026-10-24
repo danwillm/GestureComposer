@@ -1,0 +1,2 @@
+add_executable(gesture_composer_example_basic basic.cpp)
+target_link_libraries(gesture_composer_example_basic PRIVATE gesture_composer)
