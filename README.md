@@ -68,7 +68,7 @@ Standalone: `cmake -S . -B build && cmake --build build --config Release && ctes
 | **Gesture** | A pattern plus context and arbitration | `.trigger()`, `.arm(cond, minHold)`, `.gate(cond)`, `.cancelIf(cond)`, `.hands()`, `.priority()`, `.exclusive(group)`, `.shared()`, `.aim(Aim, Stabilize)`, `.ambiguity(Resolve::Wait, window)`, `.onEvent(cb)` |
 
 Events: `Armed`/`Disarmed` (show an affordance), `Began`/`Updated`/`Ended`/`Cancelled` (continuous patterns), `Triggered` (discrete).
-Continuous state, including hold progress, armed state and aim rays, is available from `composer.state(id, hand)`. Signal values come from `composer.signal(sig, hand)`, and raw features from `composer.features(hand)`.
+Besides events, you can poll gesture state, live signal values and raw hand features every frame. See [Polling state and signals](#polling-state-and-signals).
 
 ### What each condition does for you
 
@@ -89,6 +89,102 @@ Continuous state, including hold progress, armed state and aim rays, is availabl
 ### Aim
 
 `Aim::IndexRay` and `Aim::ShoulderRay` (falls back to the index ray without a head pose) are One-Euro filtered. With `Stabilize::RewindToOnset`, a discrete gesture reports the ray from the last moment it was stable before the confirming motion. This is detected from the ray's own angular speed and bounded by `Config::rewindMax`, which counters the Heisenberg effect.
+
+## Polling state and signals
+
+Events tell you when something *changes*. For anything you read every frame (held buttons, analog values, UI feedback), poll after `update()` instead. There are three levels:
+
+| Call | Returns | Use it for |
+|---|---|---|
+| `composer.state(id, hand)` | `GestureState`: the gesture's **decision**, after hysteresis, onset, gates, arming and arbitration | game logic: "is the user grabbing?", "is the menu armed?" |
+| `composer.signal(sig, hand)` | `SignalValue {value, confidence}`: the **raw score** 0..1 of one ingredient, recomputed every frame with no decisions applied | analog feedback: pinch rings, trigger axes, debug readouts |
+| `composer.features(hand)` | `HandFeatures`: filtered **measurements** (palm pose, velocities, curls, pinch distances, rays) | attaching objects to the hand, custom logic |
+
+### Held buttons: `state().active`
+
+`active` is only true for continuous gestures (`active(...)`, or `both(active(...))`). A `press()`, `click()` or `hold()` gesture never reports `active`; read those from events. To get a held button and its "pressed" moment from one gesture, use `active()`. Its `Began` event fires at the same instant `press()` would.
+
+```cpp
+gc::Signal sIndexPinch = pinch(Finger::Index);   // keep it: needed for signal() below
+gc::GestureId pinchHeld = composer.add(gesture("pinch_held")
+    .trigger(active(Condition(sIndexPinch).onset(true)))   // onset: a hand appearing pinched doesn't count
+    .updates(false));                                     // no per-frame Updated events: we poll
+
+// every frame, after update():
+const bool pinching = composer.state(pinchHeld, gc::Hand::Right).active;
+```
+
+### Analog values: `signal()`
+
+```cpp
+const gc::SignalValue p = composer.signal(sIndexPinch, gc::Hand::Right);
+pinchRing.setFill(p.value);                      // 0 = open, 1 = touching
+pinchRing.setVisible(p.confidence > 0.3f);       // hide when the fingers aren't visible to the tracker
+```
+
+`signal()` looks a signal up by the **object you built**. Keep the `gc::Signal` you passed to the gesture; a newly created `pinch(...)` won't be found and returns `{0, 0}`. A signal that no gesture uses must be registered with `composer.track(sig)` at setup. Calling it later triggers a recompile, which resets runtime state. Composite signals work too:
+
+```cpp
+gc::Signal palmToHead = palmFacing(Target::Head) && inView(40.f) && still();
+composer.track(palmToHead);                      // only needed if no gesture uses this exact object
+float facing = composer.signal(palmToHead, gc::Hand::Left).value;
+```
+
+### Affordances and progress: `state().armed` and `state().progress`
+
+```cpp
+// Show a "menu available" hint while the arm conditions hold, before the user pinches.
+const gc::GestureState menuState = composer.state(menu, gc::Hand::Left);
+menuHint.setVisible(menuState.armed);            // only meaningful for gestures with .arm(...)
+
+// Fill a radial timer for a long-press: hold(pinch(Finger::Index), 600ms)
+const gc::GestureState lp = composer.state(longPress, gc::Hand::Right);
+radial.setFill(lp.progress);                     // 0..1 while held; 0 when released
+```
+
+`progress` also reports sequence and repeat completion (`seq` steps done / total, `repeat` count / n), click timing, and `active(...).minDuration()`.
+
+### Aim rays: `state().ray`
+
+```cpp
+gc::GestureId aim = composer.add(gesture("aim")
+    .trigger(active(extended(Finger::Index) && curled(Finger::Middle, Finger::Ring, Finger::Little)))
+    .aim(gc::Aim::IndexRay)
+    .updates(false));
+
+const gc::GestureState a = composer.state(aim, gc::Hand::Right);
+if (a.active && a.rayValid) teleportArc.update(a.ray.origin, a.ray.direction);
+```
+
+The ray is filtered and available whenever the gesture has `.aim(...)`, even while it isn't active (useful for a faint "preview" ray).
+
+### Raw measurements: `features()`
+
+```cpp
+const gc::HandFeatures& f = composer.features(gc::Hand::Right);
+if (f.tracked) {
+  gc::Vec3 pinchPoint = gc::lerp(f.position(gc::Joint::ThumbTip), f.position(gc::Joint::IndexTip), 0.5f);
+  heldObject.follow(pinchPoint, f.palmNormal, f.palmForward);   // filtered palm frame
+  throwVelocity = f.palmVelocity;                               // m/s, filtered
+}
+float middleCurl = f.curl[static_cast<int>(gc::Finger::Middle)];  // 0 straight .. 1 curled
+float gap        = f.pinchDistance[static_cast<int>(gc::Finger::Index)];  // surface distance, scaled metres
+```
+
+Only features that a registered (enabled) gesture or tracked signal needs are computed each frame. For example, `curl` stays at its last value if nothing uses a curl-based signal. Use `composer.featureMask()` to check what is being computed, or `track()` a signal that needs the feature.
+
+### What each `GestureState` field means
+
+| Field | Meaningful for |
+|---|---|
+| `active` | continuous gestures (`active`, `both(active)`, `chord` of actives) |
+| `armed` | gestures with `.arm(...)` |
+| `progress` | `hold`, `seq`, `repeat`, `click`, `active(...).minDuration()` |
+| `strength` | single-step triggers (`press`, `click`, `active`, `hold`): current value of the trigger's signal; for `seq`/`repeat` it is the value at the last completed step |
+| `ray`, `rayValid` | gestures with `.aim(...)` |
+| `since` | all: time of the last state change |
+
+All of these reflect the most recent `update()`. With hands fed in separate calls, `signal()` and `features()` for a hand change only on calls that carry new data for it. `state()` is re-evaluated on every call, so time-based fields such as hold `progress` keep advancing.
 
 ## Feeding input
 
